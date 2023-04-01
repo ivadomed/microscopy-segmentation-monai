@@ -127,19 +127,19 @@ train_transforms = Compose(
         AsDiscreteD(keys="label", rounding='torchrounding')
     ]
 )
-new_val_transforms = Compose(
+val_transforms = Compose(
     [
-        LoadImaged(keys=["image", "label"]),
-        EnsureChannelFirstd(keys=["image", "label"]),
-        NormalizeIntensityd(keys="image"),
+        LoadImageD(keys=["image", "label"]),
+        EnsureChannelFirstD(keys=["image", "label"]),
+        NormalizeIntensityD(keys="image"),
         Lambda(func=AssignPixelSize(keys=["image", "label"], px_size_key="px_size")),
         SpacingD(
             keys=["image", "label"], 
             pixdim=(0.1, 0.1),
             mode=("bilinear", "nearest"),
         ),
-        NormalizeIntensityd(keys="label", subtrahend=0, divisor=127, nonzero=True),
-        AsDiscreted(keys="label", rounding='torchrounding')
+        NormalizeIntensityD(keys="label", subtrahend=0, divisor=127, nonzero=True),
+        AsDiscreteD(keys="label", rounding='torchrounding')
     ]
 )
 
