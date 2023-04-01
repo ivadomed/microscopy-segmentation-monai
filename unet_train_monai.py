@@ -172,8 +172,8 @@ val_ds = monai.data.GridPatchDataset(data=val_data, patch_iter=patch_iterator)
 val_loader = DataLoader(val_ds, batch_size=bs, num_workers=nw, collate_fn=list_data_collate)
 
 #TODO: try one-hot encoding with softmax
-post_pred = Compose([Activations(sigmoid=True), AsDiscrete(threshold=0.5)])
-post_label = Compose([AsDiscrete()])
+post_pred = Compose([Activations(softmax=True), AsDiscrete(argmax=True, to_onehot=3)])
+post_label = Compose([AsDiscrete(to_onehot=3)])
 
 # define UNet
 device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -198,7 +198,7 @@ dice_metric = DiceMetric(include_background=True, get_not_nans=False, reduction=
 # NOTE: in ivadomed, a final activation function is applied at the end of the UNet decoder
 # see https://github.com/ivadomed/ivadomed/blob/e101ebea632683d67deab3c50dd6b372207de2a9/ivadomed/models.py#L462
 # this is not the case with the default monai UNet but the sigmoid is applied inside the loss function
-loss_function = monai.losses.DiceLoss(include_background=True, sigmoid=True)
+loss_function = monai.losses.DiceLoss(include_background=True, to_onehot_y=True, softmax=True)
 optimizer = torch.optim.Adam(params=model.parameters(), lr=5e-3)
 # original config used CosineAnnealingLR; for more information on how to use it with 
 # monai, see https://github.com/Project-MONAI/tutorials/blob/main/modules/learning_rate.ipynb
@@ -223,21 +223,13 @@ for epoch in range(num_epochs):
             iteration += 1
             global_it = loader_size * epoch + iteration
 
-            inputs = batch_data[0]["im"].to(device)
-            mask_ax, mask_my = batch_data[0]["seg-ax"].to(device), batch_data[0]["seg-my"].to(device)
-            # merge axon and myelin masks into a single label tensor of size (bs, 2, 256, 256)
-            labels = torch.cat((mask_ax, mask_my), dim=1)
-            # plot_2d_or_3d_image(inputs, global_it, writer, index=0, tag="TRAIN-image")
-            # plot_2d_or_3d_image([labels[0][0]], global_it, writer, index=0, tag="TRAIN-label-ax")
-            # plot_2d_or_3d_image([labels[0][1]], global_it, writer, index=0, tag="TRAIN-label-my")
+            inputs, labels = (
+                batch_data[0]["image"].to(device),
+                batch_data[0]["label"].to(device)    
+            )
 
             optimizer.zero_grad()
             outputs = model(inputs)
-            # NOTE: I prefer not to plot the post-processed predictions during training, as I'm not sure if 
-            # the gradients are accumulated through the post_pred transform
-            # plot_2d_or_3d_image([post_pred(outputs[0][0])], global_it, writer, index=0, tag="TRAIN-pred-ax")
-            # plot_2d_or_3d_image([post_pred(outputs[0][1])], global_it, writer, index=0, tag="TRAIN-pred-my")
-
             loss = loss_function(outputs, labels)
             loss.backward()
 
@@ -261,9 +253,8 @@ for epoch in range(num_epochs):
             val_labels = None
             val_outputs = None
             for val_data in val_loader:
-                val_images = val_data[0]["im"].to(device)
-                val_labels = (val_data[0]["seg-ax"].to(device), val_data[0]["seg-my"].to(device))
-                val_labels = torch.cat(val_labels, dim=1)
+                val_images = val_data[0]["image"].to(device)
+                val_labels = val_data[0]["label"].to(device)
                 roi_size = (256, 256)
                 sw_batch_size = 4
                 val_outputs = sliding_window_inference(val_images, roi_size, sw_batch_size, model)
@@ -288,9 +279,9 @@ for epoch in range(num_epochs):
 
             writer.add_scalar("val_mean_dice", metric, epoch+1)
             plot_2d_or_3d_image(val_images, epoch+1, writer, index=0, tag="image")
-            plot_2d_or_3d_image([val_labels[0][0]], epoch+1, writer, index=0, tag="VAL-label-ax")
+            plot_2d_or_3d_image([val_labels[0][2]], epoch+1, writer, index=0, tag="VAL-label-ax")
             plot_2d_or_3d_image([val_labels[0][1]], epoch+1, writer, index=0, tag="VAL-label-my")
-            plot_2d_or_3d_image([val_outputs[0][0]], epoch+1, writer, index=0, tag="VAL-pred-ax")
+            plot_2d_or_3d_image([val_outputs[0][2]], epoch+1, writer, index=0, tag="VAL-pred-ax")
             plot_2d_or_3d_image([val_outputs[0][1]], epoch+1, writer, index=0, tag="VAL-pred-my")
     
 print(f"Training complete. Best metric: {best_metric:.4f} at epoch {best_metric_epoch}")
