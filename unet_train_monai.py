@@ -60,22 +60,21 @@ if device != "cpu":
 # load data from SEM dataset
 data_path = working_dir / 'data_axondeepseg_sem/'
 images = sorted(data_path.rglob("*_SEM.png"))
-ax_labels = sorted(data_path.rglob("*_SEM_seg-axon-manual.png"))
-my_labels = sorted(data_path.rglob("*_SEM_seg-myelin-manual.png"))
+labels = sorted(data_path.rglob("*_SEM_seg-axonmyelin-manual.png"))
 train, val, test = [], [], []
 
-# manually selecting samples to reproduce default SEM model training config
-for example in zip(images, ax_labels, my_labels):
+# manual split to reproduce default SEM model training config
+for example in zip(images, labels):
     fname = str(example[0])
     
-    # add pixel size to have them inside the data dict
+    # add pixel size to the data dict
     metadata_fname = example[0].parent.glob("*.json")
     with open(next(metadata_fname)) as metadata_f:
         metadata = json.load(metadata_f)
-        im, ax, my = example
+        im, label = example
         # isotropic pixel size: store a single value
         px_size = metadata['PixelSize'][0]
-        example = (im, ax, my, px_size)
+        example = (im, label, px_size)
 
     if 'sub-rat6' in fname:
         test.append(example)
@@ -85,59 +84,62 @@ for example in zip(images, ax_labels, my_labels):
         train.append(example)
 
 # data dicts for train/val/test splits
-train_files = [{"im": str(img), "seg-ax": str(ax), "seg-my": str(my), "px_size": px} for (img, ax, my, px) in train]
-val_files = [{"im": str(img), "seg-ax": str(ax), "seg-my": str(my), "px_size": px} for (img, ax, my, px) in val]
-test_files = [{"im": str(img), "seg-ax": str(ax), "seg-my": str(my), "px_size": px} for (img, ax, my, px) in test]
+train_files = [{"image": str(img), "label": str(label), "px_size": px} for (img, label, px) in train]
+val_files = [{"image": str(img), "label": str(label), "px_size": px} for (img, label, px) in val]
+test_files = [{"image": str(img), "label": str(label), "px_size": px} for (img, label, px) in test]
 
 # define transforms
 train_transforms = Compose(
     [
-        LoadImageD(keys=["im", "seg-ax", "seg-my"]),
-        EnsureChannelFirstD(keys=["im", "seg-ax", "seg-my"]),
-        NormalizeIntensityD(keys="im"),
+        LoadImageD(keys=["image", "label"]),
+        EnsureChannelFirstD(keys=["image", "label"]),
+        NormalizeIntensityD(keys="image"),
         # resampling to 0.1 um/px
-        Lambda(func=AssignPixelSize(keys=["im", "seg-ax", "seg-my"], px_size_key="px_size")),
+        Lambda(func=AssignPixelSize(keys=["image", "label"], px_size_key="px_size")),
         SpacingD(
-            keys=["im", "seg-ax", "seg-my"], 
+            keys=["image", "label"], 
             pixdim=(0.1, 0.1),
-            mode=("bilinear", "nearest", "nearest"),
+            mode=("bilinear", "nearest"),
         ),
         # affine and elastic transforms: adapted from ADS default-SEM-model
         # see https://github.com/axondeepseg/default-SEM-model
         RandAffineD(
-            keys=["im", "seg-ax", "seg-my"], 
+            keys=["image", "label"],
             prob=1.0, 
             rotate_range=np.pi/64, 
             scale_range=0.05,
             translate_range=(10, 10),
             padding_mode="zeros",
-            mode=("bilinear", "nearest", "nearest"),
+            mode=("bilinear", "nearest"),
             device=device
         ),
         Rand2DElasticD(
-            keys=["im", "seg-ax", "seg-my"],
+            keys=["image", "label"],
             prob=0.5,
             spacing=(30, 30),
             magnitude_range=(1, 2),
             padding_mode="zeros",
-            mode=("bilinear", "nearest", "nearest"),
+            mode=("bilinear", "nearest"),
             device=device,
         ),
-        AsDiscreteD(keys=["seg-ax", "seg-my"], threshold=127)
+        # change label values from [0, 127, 255] to [0, 1, 2]
+        NormalizeIntensityD(keys="label", subtrahend=0, divisor=127, nonzero=True),
+        AsDiscreteD(keys="label", rounding='torchrounding')
     ]
 )
-val_transforms = Compose(
+new_val_transforms = Compose(
     [
-        LoadImageD(keys=["im", "seg-ax", "seg-my"]),
-        EnsureChannelFirstD(keys=["im", "seg-ax", "seg-my"]),
-        NormalizeIntensityD(keys="im"),
-        Lambda(func=AssignPixelSize(keys=["im", "seg-ax", "seg-my"], px_size_key="px_size")),
+        LoadImaged(keys=["image", "label"]),
+        EnsureChannelFirstd(keys=["image", "label"]),
+        NormalizeIntensityd(keys="image"),
+        Lambda(func=AssignPixelSize(keys=["image", "label"], px_size_key="px_size")),
         SpacingD(
-            keys=["im", "seg-ax", "seg-my"], 
+            keys=["image", "label"], 
             pixdim=(0.1, 0.1),
-            mode=("bilinear", "nearest", "nearest"),
+            mode=("bilinear", "nearest"),
         ),
-        AsDiscreteD(keys=["seg-ax", "seg-my"], threshold=127)
+        NormalizeIntensityd(keys="label", subtrahend=0, divisor=127, nonzero=True),
+        AsDiscreted(keys="label", rounding='torchrounding')
     ]
 )
 
@@ -148,7 +150,7 @@ val_data = monai.data.Dataset(data=val_files, transform=val_transforms)
 # note that we need a GridPatchDataset instead of a Dataset to stack the patches
 # otherwise, the vanilla Dataset class does not support different image sizes
 # (which is often the case for microscopy data)
-patch_iterator = monai.data.PatchIterd(keys=["im", "seg-ax", "seg-my"], patch_size=(256, 256), mode='constant')
+patch_iterator = monai.data.PatchIterd(keys=["image", "label"], patch_size=(256, 256), mode='constant')
 bs = 4
 # need num_worker=0 in dataloader for GPU
 nw = 0
@@ -157,7 +159,7 @@ nw = 0
 check_ds = monai.data.GridPatchDataset(data=train_data, patch_iter=patch_iterator)
 check_loader = DataLoader(check_ds, batch_size=bs, num_workers=nw, collate_fn=list_data_collate)
 check_data = monai.utils.misc.first(check_loader)
-print(check_data[0]["im"].shape, check_data[0]["seg-ax"].shape, check_data[0]["seg-my"].shape)
+print(check_data[0]["image"].shape, check_data[0]["label"].shape)
 loader_size = sum(1 for _ in check_loader)
 print(f"Size of the training loader: {loader_size}")
 
@@ -178,7 +180,7 @@ device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = monai.networks.nets.UNet(
     spatial_dims=2,
     in_channels=1,
-    out_channels=2,      # NOTE: in her thesis, Marie-Helene mentions out_channels=3
+    out_channels=3,
     channels=(64, 128, 256, 512),
     strides=(1, 1, 1),
     act="ReLU",
